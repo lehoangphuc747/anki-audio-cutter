@@ -897,6 +897,7 @@ class AudioCutterDialog(QDialog):
         self.resize(720, 700)
 
         self._src_path: str = ""
+        self._loaded_player_path: str = ""
         self._duration: float = 0.0
         self._field_editors: dict[str, QPlainTextEdit] = {}
         self._stop_at_ms: int = -1
@@ -1590,6 +1591,7 @@ class AudioCutterDialog(QDialog):
                 self._player.setSource(url)
             else:
                 self._player.setMedia(QMediaContent(url))
+            self._loaded_player_path = path
         self._set_audio_loaded(True)
 
         # Load waveform in background
@@ -1644,9 +1646,66 @@ class AudioCutterDialog(QDialog):
             return s, e
         return None
 
+    def _ensure_original_source_loaded(self) -> None:
+        """Ensure the main source audio is loaded in the player."""
+        if not HAS_MEDIA or not self._src_path:
+            return
+
+        is_loaded = False
+        if QT_MAJOR == 6:
+            current_src = self._player.source()
+            url = QUrl.fromLocalFile(self._src_path)
+            if current_src == url:
+                is_loaded = True
+        else:
+            if getattr(self, "_loaded_player_path", "") == self._src_path:
+                is_loaded = True
+
+        if not is_loaded:
+            self._player.stop()
+            self._stop_at_ms = -1
+            
+            url = QUrl.fromLocalFile(self._src_path)
+            if QT_MAJOR == 6:
+                self._player.setSource(url)
+            else:
+                self._player.setMedia(QMediaContent(url))
+            self._loaded_player_path = self._src_path
+
+            # Wait synchronously (using event loop) until media is ready
+            from aqt.qt import QEventLoop
+            loop = QEventLoop()
+
+            def check_status(*args):
+                status = self._player.mediaStatus()
+                if QT_MAJOR == 6:
+                    ready = status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia)
+                    invalid = status == QMediaPlayer.MediaStatus.InvalidMedia
+                else:
+                    ready = status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia)
+                    invalid = status == QMediaPlayer.InvalidMedia
+                if ready or invalid:
+                    loop.quit()
+
+            self._player.mediaStatusChanged.connect(check_status)
+
+            safety_timer = QTimer(self)
+            safety_timer.setSingleShot(True)
+            qconnect(safety_timer.timeout, loop.quit)
+            safety_timer.start(1500)
+
+            loop.exec()
+
+            try:
+                self._player.mediaStatusChanged.disconnect(check_status)
+            except Exception:
+                pass
+            safety_timer.stop()
+
     def _on_play_pause(self) -> None:
         if not HAS_MEDIA or not self._src_path:
             return
+        self._ensure_original_source_loaded()
         if QT_MAJOR == 6:
             playing = (
                 self._player.playbackState()
@@ -1762,6 +1821,7 @@ class AudioCutterDialog(QDialog):
     def _on_preview(self) -> None:
         if not HAS_MEDIA or not self._src_path:
             return
+        self._ensure_original_source_loaded()
         region = self._read_region()
         if region is None:
             return
@@ -1783,6 +1843,7 @@ class AudioCutterDialog(QDialog):
 
         # Auto hear on nudge
         if HAS_MEDIA:
+            self._ensure_original_source_loaded()
             if is_start:
                 # Play segment from start point
                 self._stop_at_ms = int(round((new_val + PREVIEW_DURATION_SEC) * 1000))
@@ -1798,6 +1859,7 @@ class AudioCutterDialog(QDialog):
     def _on_preview_start(self) -> None:
         if not HAS_MEDIA or not self._src_path:
             return
+        self._ensure_original_source_loaded()
         start = parse_time(self.input_start.text())
         if start is None:
             tooltip(tr("invalid_time_format"), parent=self)
@@ -1811,6 +1873,7 @@ class AudioCutterDialog(QDialog):
     def _on_preview_end(self) -> None:
         if not HAS_MEDIA or not self._src_path:
             return
+        self._ensure_original_source_loaded()
         end = parse_time(self.input_end.text())
         if end is None:
             tooltip(tr("invalid_time_format"), parent=self)
@@ -1970,6 +2033,7 @@ class AudioCutterDialog(QDialog):
             self._player.setSource(url)
         else:
             self._player.setMedia(QMediaContent(url))
+        self._loaded_player_path = cut_path
         self._player.play()
         self._tick.start()
 
@@ -2029,6 +2093,7 @@ class AudioCutterDialog(QDialog):
                     self._player.setSource(url)
                 else:
                     self._player.setMedia(QMediaContent(url))
+                self._loaded_player_path = self._src_path
 
             try:
                 mw.reset()
@@ -2476,39 +2541,20 @@ class AudioCutterDialog(QDialog):
         self.input_end.blockSignals(False)
 
     def _on_queue_play(self) -> None:
-        """Play the currently selected queue item (cut audio or region preview)."""
+        """Play the currently selected queue item (always preview from source audio to match playhead)."""
         row = self.queue_list.currentRow()
         if row < 0 or row >= len(self._batch_queue):
             tooltip(tr("queue_no_selection"), parent=self)
             return
-        s, e, filename = self._batch_queue[row]
+        s, e, _filename = self._batch_queue[row]
 
-        if not HAS_MEDIA:
+        if not HAS_MEDIA or not self._src_path:
             return
 
-        if filename:
-            # Play the already-cut audio file
-            cut_path = os.path.join(mw.col.media.dir(), filename)
-            if os.path.exists(cut_path):
-                self._stop_at_ms = -1
-                url = QUrl.fromLocalFile(cut_path)
-                if QT_MAJOR == 6:
-                    self._player.setSource(url)
-                else:
-                    self._player.setMedia(QMediaContent(url))
-                self._player.play()
-                self._tick.start()
-                tooltip(tr("queue_preview_cut"), parent=self, period=1000)
-        elif self._src_path:
-            # Preview region from source audio
-            # Reload source audio if needed
-            url = QUrl.fromLocalFile(self._src_path)
-            if QT_MAJOR == 6:
-                current_src = self._player.source()
-                if current_src != url:
-                    self._player.setSource(url)
-            self._stop_at_ms = int(round(e * 1000))
-            self._player.setPosition(int(round(s * 1000)))
-            self._player.play()
-            self._tick.start()
-            tooltip(tr("queue_preview_uncut"), parent=self, period=1000)
+        self._ensure_original_source_loaded()
+
+        self._stop_at_ms = int(round(e * 1000))
+        self._player.setPosition(int(round(s * 1000)))
+        self._player.play()
+        self._tick.start()
+        tooltip(tr("queue_preview_uncut"), parent=self, period=1000)
