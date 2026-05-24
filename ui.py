@@ -695,6 +695,32 @@ class AudioCutterDialog(QDialog):
             if col:
                 self._notetype_names = [n.name for n in col.models.all_names_and_ids()]
 
+    def _is_field_pinned(self, field_name: str) -> bool:
+        cfg = _config()
+        pinned_dict = cfg.get("pinned_fields", {})
+        notetype_name = self._selected_notetype or ""
+        pinned_list = pinned_dict.get(notetype_name, [])
+        return field_name in pinned_list
+
+    def _set_field_pinned(self, field_name: str, pinned: bool) -> None:
+        cfg = _config()
+        pinned_dict = cfg.get("pinned_fields", {})
+        notetype_name = self._selected_notetype or ""
+        if notetype_name not in pinned_dict:
+            pinned_dict[notetype_name] = []
+        
+        pinned_list = pinned_dict[notetype_name]
+        if pinned:
+            if field_name not in pinned_list:
+                pinned_list.append(field_name)
+        else:
+            if field_name in pinned_list:
+                pinned_list.remove(field_name)
+                
+        pinned_dict[notetype_name] = pinned_list
+        cfg["pinned_fields"] = pinned_dict
+        _save_config(cfg)
+
     def _render_fields_for_current_notetype(self) -> None:
         col = mw.col
         if col is None:
@@ -740,6 +766,16 @@ class AudioCutterDialog(QDialog):
             self.fields_layout.removeRow(0)
         self._field_editors.clear()
 
+        # Determine alignment flags and cursor types based on Qt version
+        if QT_MAJOR == 6:
+            align_right = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+            align_center = Qt.AlignmentFlag.AlignVCenter
+            pointing_hand = Qt.CursorShape.PointingHandCursor
+        else:
+            align_right = Qt.AlignVCenter | Qt.AlignRight
+            align_center = Qt.AlignVCenter
+            pointing_hand = Qt.PointingHandCursor
+
         for fname in field_names:
             editor = QPlainTextEdit()
             editor.setMaximumHeight(58)
@@ -748,13 +784,62 @@ class AudioCutterDialog(QDialog):
                 editor.setPlainText(saved[fname])
             self._field_editors[fname] = editor
 
-            if fname == audio_field:
-                lbl = QLabel(tr("label_audio_field_target", field=fname))
-                lbl.setStyleSheet(STYLING_ACTIVE_LABEL)
-                editor.setStyleSheet(STYLING_ACTIVE_FIELD)
-                self.fields_layout.addRow(lbl, editor)
-            else:
-                self.fields_layout.addRow(QLabel(fname + ":"), editor)
+            is_audio = (fname == audio_field)
+            is_pinned = self._is_field_pinned(fname)
+
+            lbl_widget = QWidget()
+            lbl_layout = QHBoxLayout(lbl_widget)
+            lbl_layout.setContentsMargins(0, 0, 5, 0)
+            lbl_layout.setSpacing(4)
+
+            lbl_text = QLabel(tr("label_audio_field_target", field=fname) if is_audio else f"{fname}:")
+            if is_audio:
+                lbl_text.setStyleSheet(STYLING_ACTIVE_LABEL)
+
+            pin_btn = QPushButton("📌")
+            pin_btn.setCheckable(True)
+            pin_btn.setFlat(True)
+            pin_btn.setChecked(is_pinned)
+            pin_btn.setFixedSize(20, 20)
+            pin_btn.setCursor(pointing_hand)
+            pin_btn.setToolTip("Keep field content after adding note (Pin)")
+
+            def update_style(checked, b=pin_btn):
+                if checked:
+                    b.setStyleSheet("""
+                        QPushButton {
+                            border: 1px solid #0078d7;
+                            background-color: rgba(0, 120, 215, 0.15);
+                            border-radius: 3px;
+                            padding: 0;
+                            margin: 0;
+                        }
+                    """)
+                else:
+                    b.setStyleSheet("""
+                        QPushButton {
+                            border: none;
+                            background-color: transparent;
+                            padding: 0;
+                            margin: 0;
+                        }
+                        QPushButton:hover {
+                            background-color: rgba(0, 0, 0, 0.05);
+                            border-radius: 3px;
+                        }
+                    """)
+
+            update_style(is_pinned)
+
+            qconnect(pin_btn.clicked, lambda checked, fn=fname, b=pin_btn: (
+                update_style(checked, b),
+                self._set_field_pinned(fn, checked)
+            ))
+
+            lbl_layout.addWidget(lbl_text, 1, align_right)
+            lbl_layout.addWidget(pin_btn, 0, align_center)
+
+            self.fields_layout.addRow(lbl_widget, editor)
 
     # ------------------------- File picking ----------------
 
@@ -1334,9 +1419,10 @@ class AudioCutterDialog(QDialog):
                 tr("note_added", filename=self._last_audio_file),
                 parent=self, period=1800,
             )
-            # Clear text fields, keep audio + region
-            for editor in self._field_editors.values():
-                editor.clear()
+            # Clear text fields, keep audio + region (respecting pinned fields)
+            for fname, editor in self._field_editors.items():
+                if not self._is_field_pinned(fname):
+                    editor.clear()
             self.input_tags.clear()
         else:
             showWarning(tr("note_add_failed"), parent=self)
@@ -1481,8 +1567,10 @@ class AudioCutterDialog(QDialog):
                 tr("note_added", filename=media_filename),
                 parent=self, period=1800,
             )
-            for editor in self._field_editors.values():
-                editor.clear()
+            # Clear text fields (except pinned ones)
+            for fname, editor in self._field_editors.items():
+                if not self._is_field_pinned(fname):
+                    editor.clear()
             self.input_tags.clear()
         else:
             showWarning(tr("note_add_failed"), parent=self)
