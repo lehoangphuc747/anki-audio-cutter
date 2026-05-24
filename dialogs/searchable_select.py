@@ -4,7 +4,7 @@ SearchableSelectDialog base class for selector dialogs.
 """
 from typing import Optional
 from aqt.qt import (
-    QDialog, QHBoxLayout, QLineEdit, QListWidget, QVBoxLayout, QWidget, Qt, qconnect
+    QDialog, QHBoxLayout, QLineEdit, QListWidget, QPushButton, QVBoxLayout, QWidget, Qt, qconnect
 )
 from .._tr import tr
 from ..constants import STYLING_LINE_EDIT_FOCUS, STYLING_SEARCH_DIALOG
@@ -17,7 +17,7 @@ class SearchableSelectDialog(QDialog):
                  current: str = "", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumSize(400, 460)
+        self.setMinimumSize(400, 480)
         self._items = items
         self._result: Optional[str] = None
 
@@ -39,6 +39,19 @@ class SearchableSelectDialog(QDialog):
         self._build_crud_buttons(self._crud_row)
         layout.addLayout(self._crud_row)
 
+        # Confirm / Cancel buttons row at the very bottom
+        self._btn_row = QHBoxLayout()
+        self._btn_row.setContentsMargins(0, 8, 0, 0)
+        self._btn_row.addStretch(1)
+
+        self._btn_select = QPushButton(tr("search_btn_select"))
+        self._btn_cancel = QPushButton(tr("ffmpeg_cancel"))
+        self._btn_select.setEnabled(False)
+
+        self._btn_row.addWidget(self._btn_select)
+        self._btn_row.addWidget(self._btn_cancel)
+        layout.addLayout(self._btn_row)
+
         # Pre-select current item
         if current:
             matches = self._list.findItems(
@@ -51,10 +64,22 @@ class SearchableSelectDialog(QDialog):
         qconnect(self._search.textChanged, self._on_filter)
         qconnect(self._list.itemDoubleClicked, self._on_accept)
         qconnect(self._search.returnPressed, self._on_enter)
+        qconnect(self._list.currentItemChanged, self._on_current_changed)
+        qconnect(self._btn_select.clicked, self._on_select_clicked)
+        qconnect(self._btn_cancel.clicked, self.reject)
 
     def _build_crud_buttons(self, layout: QHBoxLayout) -> None:
         """Override in subclasses to add Add/Rename/Delete buttons."""
         pass
+ 
+    def _on_current_changed(self, current, previous) -> None:
+        self._btn_select.setEnabled(current is not None)
+ 
+    def _on_select_clicked(self) -> None:
+        curr = self._list.currentItem()
+        if curr:
+            self._result = curr.text()
+            self.accept()
 
     def _on_filter(self, text: str) -> None:
         needle = text.lower()

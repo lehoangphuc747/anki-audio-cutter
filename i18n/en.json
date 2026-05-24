@@ -178,5 +178,6 @@
   "settings_ffmpeg_update_available": "Update available: {current} \u2192 {latest}",
   "settings_ffmpeg_check_error": "Could not check for updates.",
   "settings_btn_settings": "\u2699",
-  "settings_tooltip": "Open Settings"
+  "settings_tooltip": "Open Settings",
+  "search_btn_select": "Select"
 }
