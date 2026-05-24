@@ -170,6 +170,13 @@ class AudioWaveformWidget(QAbstractSlider):
                 if self._region_callback:
                     self._region_callback(s / 1000.0, e / 1000.0)
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Select all / Reset selection to full range
+            self.set_region(self.minimum(), self.maximum())
+            if self._region_callback:
+                self._region_callback(self.minimum() / 1000.0, self.maximum() / 1000.0)
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -529,12 +536,26 @@ class AudioCutterDialog(QDialog):
         actions_lay.setContentsMargins(0, 4, 0, 0)
         self.btn_preview = QPushButton(tr("btn_preview"))
         self.btn_preview.setToolTip(tr("tooltip_preview"))
-        self.btn_preview.setMinimumWidth(100)
+        self.btn_preview.setMinimumWidth(80)
+
+        self.btn_cut = QPushButton(tr("btn_cut"))
+        self.btn_cut.setToolTip(tr("tooltip_cut"))
+        self.btn_cut.setStyleSheet(STYLING_BTN_CUT)
+        self.btn_cut.setMinimumWidth(100)
+
+        self.btn_play_cut = QPushButton(tr("btn_play_cut"))
+        self.btn_play_cut.setToolTip(tr("tooltip_play_cut"))
+        self.btn_play_cut.setEnabled(False)
+        self.btn_play_cut.setMinimumWidth(80)
+
         self.btn_add_queue = QPushButton(tr("btn_add_queue"))
         self.btn_add_queue.setToolTip(tr("tooltip_add_queue"))
-        self.btn_add_queue.setMinimumWidth(120)
+        self.btn_add_queue.setMinimumWidth(110)
+
         actions_lay.addStretch(1)
         actions_lay.addWidget(self.btn_preview)
+        actions_lay.addWidget(self.btn_cut)
+        actions_lay.addWidget(self.btn_play_cut)
         actions_lay.addWidget(self.btn_add_queue)
         rl.addLayout(actions_lay, 2, 0, 1, 5)
 
@@ -602,26 +623,23 @@ class AudioCutterDialog(QDialog):
         hint.setStyleSheet(STYLING_LBL_FILE_UNLOADED + " font-size: 11px;")
         hint.setWordWrap(True)
         action_row.addWidget(hint, 1)
+
         self.btn_undo = QPushButton(tr("btn_undo"))
         self.btn_undo.setToolTip(tr("tooltip_undo"))
         self.btn_undo.setEnabled(False)
         action_row.addWidget(self.btn_undo)
-        self.btn_cut = QPushButton(tr("btn_cut"))
-        self.btn_cut.setStyleSheet(STYLING_BTN_CUT)
-        action_row.addWidget(self.btn_cut)
-        self.btn_play_cut = QPushButton(tr("btn_play_cut"))
-        self.btn_play_cut.setToolTip(tr("tooltip_play_cut"))
-        self.btn_play_cut.setEnabled(False)
-        action_row.addWidget(self.btn_play_cut)
+
         self.btn_add_note = QPushButton(tr("btn_add_note"))
         self.btn_add_note.setEnabled(False)
         self.btn_add_note.setStyleSheet(STYLING_BTN_ADD_NOTE)
         action_row.addWidget(self.btn_add_note)
+
         self.btn_cut_and_add = QPushButton(tr("btn_cut_and_add"))
         self.btn_cut_and_add.setToolTip(tr("tooltip_cut_and_add"))
         self.btn_cut_and_add.setMinimumWidth(120)
         self.btn_cut_and_add.setStyleSheet(STYLING_BTN_CUT_AND_ADD)
         action_row.addWidget(self.btn_cut_and_add)
+        
         outer.addLayout(action_row)
 
         # Wire ---------------------------------------------
@@ -1055,10 +1073,16 @@ class AudioCutterDialog(QDialog):
 
     # ------------------------- Playback --------------------
 
+    def _read_region_silent(self) -> Optional[tuple[float, float]]:
+        s = parse_time(self.input_start.text())
+        e = parse_time(self.input_end.text())
+        if s is not None and e is not None and e > s:
+            return s, e
+        return None
+
     def _on_play_pause(self) -> None:
         if not HAS_MEDIA or not self._src_path:
             return
-        self._stop_at_ms = -1
         if QT_MAJOR == 6:
             playing = (
                 self._player.playbackState()
@@ -1068,7 +1092,19 @@ class AudioCutterDialog(QDialog):
             playing = self._player.state() == QMediaPlayer.PlayingState
         if playing:
             self._player.pause()
+            self._stop_at_ms = -1
         else:
+            region = self._read_region_silent()
+            if region:
+                start, end = region
+                start_ms = int(round(start * 1000))
+                end_ms = int(round(end * 1000))
+                current_pos = self._player.position()
+                if current_pos < start_ms or current_pos >= end_ms - 100:
+                    self._player.setPosition(start_ms)
+                self._stop_at_ms = end_ms
+            else:
+                self._stop_at_ms = -1
             self._player.play()
             self._tick.start()
 
@@ -1319,21 +1355,36 @@ class AudioCutterDialog(QDialog):
             self._cut_history_file = self._src_path
         self._cut_history.append((start, end))
 
-        # Insert sound tag into the target audio field editor immediately
-        audio_field = self.combo_audio_field.currentText()
-        if audio_field in self._field_editors:
-            editor = self._field_editors[audio_field]
-            sound_tag = f"[sound:{media_filename}]"
-            cursor = editor.textCursor()
-            if editor.toPlainText().strip():
-                if cursor.position() > 0 and not cursor.atBlockStart():
-                    editor.insertPlainText(" ")
-                editor.insertPlainText(sound_tag)
-            else:
-                editor.setPlainText(sound_tag)
-            editor.setFocus()
+        # Determine target editor: currently focused field or default audio field
+        target_editor = None
+        focused = self.focusWidget()
+        for fname, ed in self._field_editors.items():
+            if ed == focused:
+                target_editor = ed
+                break
 
-        tooltip(tr("cut_ready", filename=media_filename),
+        if target_editor is None:
+            audio_field = self.combo_audio_field.currentText()
+            if audio_field in self._field_editors:
+                target_editor = self._field_editors[audio_field]
+
+        if target_editor:
+            sound_tag = f"[sound:{media_filename}]"
+            cursor = target_editor.textCursor()
+            if target_editor.toPlainText().strip():
+                if cursor.position() > 0 and not cursor.atBlockStart():
+                    cursor.insertText(" ")
+                cursor.insertText(sound_tag)
+            else:
+                target_editor.setPlainText(sound_tag)
+            target_editor.setFocus()
+
+        # Track for file-only undo
+        self._last_audio_file = media_filename
+        self._last_note_id = None
+        self.btn_undo.setEnabled(True)
+
+        tooltip(tr("cut_to_field_success", filename=media_filename),
                 parent=self, period=1800)
 
     def _finish_cut_error(self, tb: str) -> None:
@@ -1585,38 +1636,61 @@ class AudioCutterDialog(QDialog):
     # ------------------------- Undo ----------------------
 
     def _on_undo(self) -> None:
-        if self._last_note_id is None:
+        if self._last_note_id is None and not self._last_audio_file:
             tooltip(tr("undo_nothing"), parent=self)
             return
-        nid = self._last_note_id
+
         audio_file = self._last_audio_file
 
-        ans = QMessageBox.question(
-            self,
-            tr("undo_confirm_title"),
-            tr("undo_confirm", nid=nid, filename=audio_file),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if ans != QMessageBox.StandardButton.Yes:
-            return
+        if self._last_note_id is not None:
+            nid = self._last_note_id
+            ans = QMessageBox.question(
+                self,
+                tr("undo_confirm_title"),
+                tr("undo_confirm", nid=nid, filename=audio_file),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
 
-        try:
-            _undo_last_note(audio_file)
+            try:
+                _undo_last_note(audio_file)
+                if self._cut_history:
+                    self._cut_history.pop()
+            except Exception as exc:
+                traceback.print_exc()
+                showWarning(tr("undo_error", error=exc), parent=self)
+                return
+            self._last_note_id = None
+            tooltip(tr("undo_success"), parent=self, period=1800)
+        else:
+            ans = QMessageBox.question(
+                self,
+                tr("undo_confirm_title"),
+                tr("undo_confirm_file_only", filename=audio_file),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+            media_dir = mw.col.media.dir() if (mw and mw.col) else None
+            if media_dir and audio_file:
+                audio_path = os.path.join(media_dir, audio_file)
+                if os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                    except OSError:
+                        pass
             if self._cut_history:
                 self._cut_history.pop()
-        except Exception as exc:
-            traceback.print_exc()
-            showWarning(tr("undo_error", error=exc), parent=self)
-            return
+            tooltip(tr("undo_success_file_only"), parent=self, period=1800)
 
-        self._last_note_id = None
         self._last_audio_file = ""
         self.btn_undo.setEnabled(False)
         try:
             mw.reset()
         except Exception:
             pass
-        tooltip(tr("undo_success"), parent=self, period=1800)
 
     # ------------------------- Batch queue ----------------
 

@@ -4,6 +4,19 @@ All notable changes to the **Audio Card Cutter (AnkiVN)** add-on will be documen
 
 ---
 
+## [1.1.1] - 2026-05-24
+
+### Added
+- **Double-Click Waveform Reset**: Double-clicking the waveform widget clears the region and selects the full audio length.
+- **Smart Active Field Insertion**: "Cut to Field" now automatically targets the currently focused text field editor in the dialog, falling back to the designated audio field if none is focused.
+- **File-Only Undo**: Allowed undoing the "Cut to Field" operation by deleting the last cut media file even if no note has been created yet.
+
+### Changed
+- **Audacity-Like Playback Sync**: Pressing Play (or Space) while a region is selected now plays only the selected region and pauses at the end of the region. Pressing Play again restarts from the beginning of the selection.
+- **Reorganized Actions Layout**: Moved "Cut to Field" (formerly Cut) and "Play Cut" buttons into the "Cut Region" group box, separating region-related audio actions from card/database actions.
+
+---
+
 ## [1.1.0] - 2026-05-24
 
 ### Added
