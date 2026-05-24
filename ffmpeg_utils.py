@@ -322,3 +322,50 @@ def extract_waveform(src_path: str) -> list[float]:
         traceback.print_exc()
         return []
 
+
+def get_ffmpeg_version() -> str:
+    """Return the installed FFmpeg version string (e.g. '6.1.1'), or '' on failure."""
+    try:
+        ffmpeg = _ffmpeg_binary()
+        res = subprocess.run([ffmpeg, "-version"], **_subprocess_kwargs())
+        m = re.search(r'ffmpeg version (\S+)', res.stdout or "")
+        if m:
+            # Strip any trailing non-numeric suffix (e.g. '-essentials_build-...')
+            raw = m.group(1)
+            parts = raw.split("-")
+            return parts[0] if parts else raw
+        return ""
+    except Exception:
+        traceback.print_exc()
+        return ""
+
+
+def check_ffmpeg_latest_version() -> str:
+    """Fetch the latest FFmpeg release version from gyan.dev. Returns '' on failure."""
+    try:
+        req = urllib.request.Request(
+            "https://www.gyan.dev/ffmpeg/builds/",
+            headers={"User-Agent": "anki-audio-cutter/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            page = resp.read().decode("utf-8", errors="ignore")
+        m = re.search(r'release:\s*([\d.]+)', page)
+        return m.group(1) if m else ""
+    except Exception:
+        traceback.print_exc()
+        return ""
+
+
+def update_ffmpeg_windows(parent: QWidget) -> bool:
+    """Check if FFmpeg is outdated and re-install if a newer version is available.
+
+    Returns True if an update was performed, False otherwise.
+    """
+    current = get_ffmpeg_version()
+    latest = check_ffmpeg_latest_version()
+    if not latest:
+        return False
+    if current == latest:
+        return False
+    return install_ffmpeg_windows(parent)
+

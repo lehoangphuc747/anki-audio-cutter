@@ -4,6 +4,29 @@ All notable changes to the **Audio Card Cutter (AnkiVN)** add-on will be documen
 
 ---
 
+## [1.2.0] - 2026-05-24
+
+### Added
+- **Enhanced Deck Selector**: Add, Rename, Delete decks directly from the selection dialog. Supports creating subdecks with parent deck selection (`Parent::Child` hierarchy).
+- **Enhanced Note Type Selector**: Add (clone from existing), Rename, Delete note types directly from the selection dialog. Safety checks warn before deleting note types with existing notes.
+- **Settings Dialog** (`⚙` button): New tabbed settings interface:
+  - **General tab**: Configure output audio format (mp3/ogg/wav/m4a/aac), bitrate, and default audio field name.
+  - **Shortcuts tab**: Reference table showing all keyboard shortcuts (primary keys + Alt alternatives).
+  - **FFmpeg tab**: View installation status, version, binary location. Download FFmpeg if missing, or check for updates and auto-update.
+- **FFmpeg Version Management**: `get_ffmpeg_version()`, `check_ffmpeg_latest_version()`, and `update_ffmpeg_windows()` — automated version checking and one-click update from gyan.dev.
+- **Queue ▶ Play Button**: Play the selected queue item directly — plays cut audio if already processed, or previews the region from source audio if not yet cut.
+- **Queue Single-Click → Waveform Highlight**: Clicking a queue item highlights its time region on the waveform and updates the Start/End input fields.
+- ~50 new i18n strings for all new features.
+
+### Fixed
+- **BUG: Double-click to insert cut audio from queue** was not working because `_on_queue_item_double_clicked` handler was defined but never connected. Now properly wired via `qconnect`.
+
+### Changed
+- Queue item display now uses `○` (uncut) and `✓` (cut) prefixes for clearer visual status.
+- Deck/notetype lists are refreshed from Anki database each time the selection dialog opens, ensuring CRUD changes are immediately reflected.
+
+---
+
 ## [1.1.1] - 2026-05-24
 
 ### Added

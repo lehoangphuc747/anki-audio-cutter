@@ -52,3 +52,15 @@ WAVEFORM_SAMPLE_RATE = 100  # Extract 100 samples per second
 WAVEFORM_BAR_WIDTH = 2
 WAVEFORM_BAR_SPACING = 1
 
+# Dialog CRUD button styling
+STYLING_DIALOG_CRUD_BTN = "padding: 4px 10px; min-width: 60px;"
+STYLING_DIALOG_CRUD_DELETE = "padding: 4px 10px; min-width: 60px; color: #ff6b6b;"
+STYLING_SETTINGS_TAB = "QTabBar::tab { padding: 6px 16px; }"
+STYLING_SETTINGS_TABLE = (
+    "QTableWidget { font-size: 12px; }"
+    "QTableWidget::item { padding: 4px 8px; }"
+    "QHeaderView::section { padding: 4px 8px; font-weight: 600; }"
+)
+STYLING_QUEUE_PLAY_BTN = "padding: 2px 6px; min-width: 50px;"
+STYLING_SETTINGS_BTN = "padding: 4px 8px; font-size: 14px; min-width: 28px;"
+

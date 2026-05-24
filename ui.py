@@ -12,9 +12,11 @@ from typing import Optional
 from aqt import mw
 from aqt.qt import (
     QAction, QColor, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
-    QGridLayout, QGroupBox, QHBoxLayout, QKeySequence, QLabel, QLineEdit,
+    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
+    QKeySequence, QLabel, QLineEdit,
     QListWidget, QMenu, QMessageBox, QPainter, QPlainTextEdit, QPushButton,
-    QScrollArea, QShortcut, QSlider, QStyle, QStyleOptionSlider, Qt, QTimer,
+    QScrollArea, QShortcut, QSlider, QStyle, QStyleOptionSlider, Qt,
+    QTabWidget, QTableWidget, QTableWidgetItem, QTimer,
     QUrl, QVBoxLayout, QWidget, qconnect, QAbstractSlider, QSizePolicy
 )
 from aqt.utils import showWarning, tooltip
@@ -36,11 +38,14 @@ from .constants import (
     STYLING_QUEUE_CUT_ALL, STYLING_DECK_BUTTON, STYLING_NOTETYPE_BUTTON,
     STYLING_ACTIVE_FIELD, STYLING_ACTIVE_LABEL, STYLING_LINE_EDIT_FOCUS,
     STYLING_SEARCH_DIALOG, STYLING_BTN_CUT, STYLING_BTN_ADD_NOTE, STYLING_BTN_CUT_AND_ADD,
-    WAVEFORM_BAR_WIDTH, WAVEFORM_BAR_SPACING, STYLING_COMBO_SPEED_STYLING
+    WAVEFORM_BAR_WIDTH, WAVEFORM_BAR_SPACING, STYLING_COMBO_SPEED_STYLING,
+    STYLING_DIALOG_CRUD_BTN, STYLING_DIALOG_CRUD_DELETE, STYLING_SETTINGS_TAB,
+    STYLING_SETTINGS_TABLE, STYLING_QUEUE_PLAY_BTN, STYLING_SETTINGS_BTN
 )
 from .ffmpeg_utils import (
     _probe_duration, _cut_audio_to_media, _is_ffmpeg_available, install_ffmpeg_windows,
-    _ffmpeg_binary, FFmpegNotFoundError, extract_waveform
+    _ffmpeg_binary, FFmpegNotFoundError, extract_waveform,
+    get_ffmpeg_version, check_ffmpeg_latest_version, update_ffmpeg_windows
 )
 from .anki_interop import (
     _config, _save_config, _add_note, _undo_last_note
@@ -302,17 +307,17 @@ class AudioWaveformWidget(QAbstractSlider):
 
 
 # =============================================================================
-# Searchable selector dialog
+# Searchable selector dialog (base)
 # =============================================================================
 
 class SearchableSelectDialog(QDialog):
-    """Modal dialog with a search box and a filterable list."""
+    """Modal dialog with a search box, filterable list, and optional CRUD buttons."""
 
     def __init__(self, title: str, items: list[str],
                  current: str = "", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumSize(360, 400)
+        self.setMinimumSize(400, 460)
         self._items = items
         self._result: Optional[str] = None
 
@@ -328,6 +333,12 @@ class SearchableSelectDialog(QDialog):
         self._list.setStyleSheet(STYLING_SEARCH_DIALOG)
         layout.addWidget(self._list, 1)
 
+        # CRUD buttons row (subclasses populate this)
+        self._crud_row = QHBoxLayout()
+        self._crud_row.setContentsMargins(0, 4, 0, 0)
+        self._build_crud_buttons(self._crud_row)
+        layout.addLayout(self._crud_row)
+
         # Pre-select current item
         if current:
             matches = self._list.findItems(
@@ -340,6 +351,10 @@ class SearchableSelectDialog(QDialog):
         qconnect(self._search.textChanged, self._on_filter)
         qconnect(self._list.itemDoubleClicked, self._on_accept)
         qconnect(self._search.returnPressed, self._on_enter)
+
+    def _build_crud_buttons(self, layout: QHBoxLayout) -> None:
+        """Override in subclasses to add Add/Rename/Delete buttons."""
+        pass
 
     def _on_filter(self, text: str) -> None:
         needle = text.lower()
@@ -365,6 +380,17 @@ class SearchableSelectDialog(QDialog):
                 self.accept()
                 return
 
+    def _refresh_list(self, items: list[str], select: str = "") -> None:
+        """Rebuild list contents and optionally select an item."""
+        self._items = items
+        self._list.clear()
+        self._list.addItems(items)
+        self._search.clear()
+        if select:
+            matches = self._list.findItems(select, Qt.MatchFlag.MatchExactly)
+            if matches:
+                self._list.setCurrentItem(matches[0])
+
     @staticmethod
     def select(title: str, items: list[str], current: str = "",
                parent: Optional[QWidget] = None) -> Optional[str]:
@@ -372,6 +398,486 @@ class SearchableSelectDialog(QDialog):
         if dlg.exec() and dlg._result:
             return dlg._result
         return None
+
+
+# =============================================================================
+# Deck select dialog with Add / Rename / Delete
+# =============================================================================
+
+class DeckSelectDialog(SearchableSelectDialog):
+    """Deck selector with CRUD operations and subdeck support."""
+
+    def _build_crud_buttons(self, layout: QHBoxLayout) -> None:
+        self.btn_add = QPushButton(tr("deck_btn_add"))
+        self.btn_add.setStyleSheet(STYLING_DIALOG_CRUD_BTN)
+        self.btn_rename = QPushButton(tr("deck_btn_rename"))
+        self.btn_rename.setStyleSheet(STYLING_DIALOG_CRUD_BTN)
+        self.btn_delete = QPushButton(tr("deck_btn_delete"))
+        self.btn_delete.setStyleSheet(STYLING_DIALOG_CRUD_DELETE)
+        layout.addStretch(1)
+        layout.addWidget(self.btn_add)
+        layout.addWidget(self.btn_rename)
+        layout.addWidget(self.btn_delete)
+
+        qconnect(self.btn_add.clicked, self._on_add_deck)
+        qconnect(self.btn_rename.clicked, self._on_rename_deck)
+        qconnect(self.btn_delete.clicked, self._on_delete_deck)
+
+    def _on_add_deck(self) -> None:
+        col = mw.col
+        if col is None:
+            return
+        # Build parent deck choices
+        all_decks = [d.name for d in col.decks.all_names_and_ids()]
+        parents = [tr("deck_add_parent_top")] + sorted(all_decks)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("deck_add_title"))
+        dlg.setMinimumWidth(350)
+        form = QFormLayout(dlg)
+
+        combo_parent = QComboBox()
+        combo_parent.addItems(parents)
+        form.addRow(tr("deck_add_parent_label"), combo_parent)
+
+        input_name = QLineEdit()
+        input_name.setPlaceholderText(tr("deck_add_name_label"))
+        form.addRow(tr("deck_add_name_label"), input_name)
+
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton("OK")
+        btn_cancel = QPushButton(tr("ffmpeg_cancel"))
+        btn_row.addStretch()
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        form.addRow(btn_row)
+
+        qconnect(btn_ok.clicked, dlg.accept)
+        qconnect(btn_cancel.clicked, dlg.reject)
+
+        if dlg.exec():
+            name = input_name.text().strip()
+            if not name:
+                tooltip(tr("deck_add_empty_name"), parent=self)
+                return
+            parent_sel = combo_parent.currentText()
+            if parent_sel == tr("deck_add_parent_top"):
+                full_name = name
+            else:
+                full_name = f"{parent_sel}::{name}"
+            col.decks.id(full_name)  # Creates if not exists
+            # Refresh list
+            new_decks = [d.name for d in col.decks.all_names_and_ids()]
+            self._refresh_list(new_decks, full_name)
+
+    def _on_rename_deck(self) -> None:
+        col = mw.col
+        if col is None:
+            return
+        current = self._list.currentItem()
+        if not current:
+            tooltip(tr("deck_select_first"), parent=self)
+            return
+        old_name = current.text()
+        new_name, ok = QInputDialog.getText(
+            self, tr("deck_rename_title"),
+            tr("deck_rename_label", name=old_name),
+            text=old_name,
+        )
+        if ok and new_name.strip() and new_name.strip() != old_name:
+            did = col.decks.id_for_name(old_name)
+            if did:
+                deck = col.decks.get(did)
+                deck["name"] = new_name.strip()
+                col.decks.save(deck)
+                new_decks = [d.name for d in col.decks.all_names_and_ids()]
+                self._refresh_list(new_decks, new_name.strip())
+
+    def _on_delete_deck(self) -> None:
+        col = mw.col
+        if col is None:
+            return
+        current = self._list.currentItem()
+        if not current:
+            tooltip(tr("deck_select_first"), parent=self)
+            return
+        name = current.text()
+        ans = QMessageBox.question(
+            self, tr("deck_delete_title"),
+            tr("deck_delete_confirm", name=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            did = col.decks.id_for_name(name)
+            if did:
+                col.decks.remove([did])
+                new_decks = [d.name for d in col.decks.all_names_and_ids()]
+                self._refresh_list(new_decks)
+                tooltip(tr("deck_delete_success"), parent=self)
+
+    @staticmethod
+    def select(title: str, items: list[str], current: str = "",
+               parent: Optional[QWidget] = None) -> Optional[str]:
+        dlg = DeckSelectDialog(title, items, current, parent)
+        if dlg.exec() and dlg._result:
+            return dlg._result
+        return None
+
+
+# =============================================================================
+# Note type select dialog with Add (Clone) / Rename / Delete
+# =============================================================================
+
+class NoteTypeSelectDialog(SearchableSelectDialog):
+    """Note type selector with CRUD operations."""
+
+    def _build_crud_buttons(self, layout: QHBoxLayout) -> None:
+        self.btn_add = QPushButton(tr("notetype_btn_add"))
+        self.btn_add.setStyleSheet(STYLING_DIALOG_CRUD_BTN)
+        self.btn_rename = QPushButton(tr("notetype_btn_rename"))
+        self.btn_rename.setStyleSheet(STYLING_DIALOG_CRUD_BTN)
+        self.btn_delete = QPushButton(tr("notetype_btn_delete"))
+        self.btn_delete.setStyleSheet(STYLING_DIALOG_CRUD_DELETE)
+        layout.addStretch(1)
+        layout.addWidget(self.btn_add)
+        layout.addWidget(self.btn_rename)
+        layout.addWidget(self.btn_delete)
+
+        qconnect(self.btn_add.clicked, self._on_add_notetype)
+        qconnect(self.btn_rename.clicked, self._on_rename_notetype)
+        qconnect(self.btn_delete.clicked, self._on_delete_notetype)
+
+    def _on_add_notetype(self) -> None:
+        col = mw.col
+        if col is None:
+            return
+        all_nt = [n.name for n in col.models.all_names_and_ids()]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("notetype_add_title"))
+        dlg.setMinimumWidth(350)
+        form = QFormLayout(dlg)
+
+        combo_clone = QComboBox()
+        combo_clone.addItems(all_nt)
+        form.addRow(tr("notetype_add_clone_label"), combo_clone)
+
+        input_name = QLineEdit()
+        input_name.setPlaceholderText(tr("notetype_add_name_label"))
+        form.addRow(tr("notetype_add_name_label"), input_name)
+
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton("OK")
+        btn_cancel = QPushButton(tr("ffmpeg_cancel"))
+        btn_row.addStretch()
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        form.addRow(btn_row)
+
+        qconnect(btn_ok.clicked, dlg.accept)
+        qconnect(btn_cancel.clicked, dlg.reject)
+
+        if dlg.exec():
+            name = input_name.text().strip()
+            if not name:
+                tooltip(tr("notetype_add_empty_name"), parent=self)
+                return
+            clone_from = combo_clone.currentText()
+            src_model = col.models.by_name(clone_from)
+            if src_model:
+                new_model = col.models.copy(src_model)
+                new_model["name"] = name
+                col.models.add(new_model)
+                new_nts = [n.name for n in col.models.all_names_and_ids()]
+                self._refresh_list(new_nts, name)
+
+    def _on_rename_notetype(self) -> None:
+        col = mw.col
+        if col is None:
+            return
+        current = self._list.currentItem()
+        if not current:
+            tooltip(tr("notetype_select_first"), parent=self)
+            return
+        old_name = current.text()
+        new_name, ok = QInputDialog.getText(
+            self, tr("notetype_rename_title"),
+            tr("notetype_rename_label", name=old_name),
+            text=old_name,
+        )
+        if ok and new_name.strip() and new_name.strip() != old_name:
+            model = col.models.by_name(old_name)
+            if model:
+                model["name"] = new_name.strip()
+                col.models.save(model)
+                new_nts = [n.name for n in col.models.all_names_and_ids()]
+                self._refresh_list(new_nts, new_name.strip())
+
+    def _on_delete_notetype(self) -> None:
+        col = mw.col
+        if col is None:
+            return
+        current = self._list.currentItem()
+        if not current:
+            tooltip(tr("notetype_select_first"), parent=self)
+            return
+        name = current.text()
+        model = col.models.by_name(name)
+        if not model:
+            return
+        # Count notes using this note type
+        note_count = col.models.use_count(model)
+        if note_count > 0:
+            ans = QMessageBox.question(
+                self, tr("notetype_delete_title"),
+                tr("notetype_delete_confirm", name=name, count=note_count),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            ans = QMessageBox.question(
+                self, tr("notetype_delete_title"),
+                tr("notetype_delete_confirm", name=name, count=0),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        col.models.remove(model)
+        new_nts = [n.name for n in col.models.all_names_and_ids()]
+        self._refresh_list(new_nts)
+        tooltip(tr("notetype_delete_success"), parent=self)
+
+    @staticmethod
+    def select(title: str, items: list[str], current: str = "",
+               parent: Optional[QWidget] = None) -> Optional[str]:
+        dlg = NoteTypeSelectDialog(title, items, current, parent)
+        if dlg.exec() and dlg._result:
+            return dlg._result
+        return None
+
+
+# =============================================================================
+# Settings dialog (General / Shortcuts / FFmpeg)
+# =============================================================================
+
+class SettingsDialog(QDialog):
+    """Settings dialog with tabbed interface."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr("settings_title"))
+        self.setMinimumSize(520, 420)
+        self._cfg = _config()
+
+        layout = QVBoxLayout(self)
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet(STYLING_SETTINGS_TAB)
+
+        self._tabs.addTab(self._build_general_tab(), tr("settings_tab_general"))
+        self._tabs.addTab(self._build_shortcuts_tab(), tr("settings_tab_shortcuts"))
+        self._tabs.addTab(self._build_ffmpeg_tab(), tr("settings_tab_ffmpeg"))
+        layout.addWidget(self._tabs)
+
+        # OK / Cancel
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._btn_ok = QPushButton("OK")
+        self._btn_cancel = QPushButton(tr("ffmpeg_cancel"))
+        btn_row.addWidget(self._btn_ok)
+        btn_row.addWidget(self._btn_cancel)
+        layout.addLayout(btn_row)
+
+        qconnect(self._btn_ok.clicked, self._on_save)
+        qconnect(self._btn_cancel.clicked, self.reject)
+
+    def _build_general_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        self._combo_format = QComboBox()
+        self._combo_format.addItems(["mp3", "ogg", "wav", "m4a", "aac"])
+        self._combo_format.setCurrentText(self._cfg.get("output_format", "mp3"))
+        form.addRow(tr("settings_general_format"), self._combo_format)
+
+        self._combo_bitrate = QComboBox()
+        self._combo_bitrate.addItems(["64k", "96k", "128k", "192k", "256k", "320k"])
+        self._combo_bitrate.setCurrentText(self._cfg.get("output_bitrate", "128k"))
+        form.addRow(tr("settings_general_bitrate"), self._combo_bitrate)
+
+        self._input_audio_field = QLineEdit()
+        self._input_audio_field.setText(self._cfg.get("audio_field", "Audio"))
+        self._input_audio_field.setPlaceholderText("Audio")
+        form.addRow(tr("settings_general_audio_field"), self._input_audio_field)
+
+        form.addRow(QLabel(""))  # spacer
+        return w
+
+    def _build_shortcuts_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        shortcuts = [
+            ("Play / Pause", "Space", "Alt+Space"),
+            ("Set Start", "[", "Alt+["),
+            ("Set End", "]", "Alt+]"),
+            ("Preview Region", "P", "Alt+P"),
+            ("Hear Start", "S", "Alt+S"),
+            ("Hear End", "E", "Alt+E"),
+            ("Nudge Start -0.1s", "A", "Alt+A"),
+            ("Nudge Start +0.1s", "D", "Alt+D"),
+            ("Nudge Start -0.5s", "Shift+A", "Alt+Shift+A"),
+            ("Nudge Start +0.5s", "Shift+D", "Alt+Shift+D"),
+            ("Nudge End -0.1s", "J", "Alt+J"),
+            ("Nudge End +0.1s", "L", "Alt+L"),
+            ("Nudge End -0.5s", "Shift+J", "Alt+Shift+J"),
+            ("Nudge End +0.5s", "Shift+L", "Alt+Shift+L"),
+            ("Seek +5s / +1s", "→ / Shift+→", ""),
+            ("Seek -5s / -1s", "← / Shift+←", ""),
+            ("Add to Queue", "Q", ""),
+            ("Cut to Field", "C", ""),
+            ("Cut && Add Note", "Ctrl+Enter", ""),
+            ("Undo", "Ctrl+Z", ""),
+            ("Close", "Ctrl+W", ""),
+        ]
+
+        table = QTableWidget(len(shortcuts), 3)
+        table.setHorizontalHeaderLabels([
+            tr("settings_shortcuts_action"),
+            tr("settings_shortcuts_primary"),
+            tr("settings_shortcuts_alt"),
+        ])
+        table.setStyleSheet(STYLING_SETTINGS_TABLE)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+
+        for row, (action, primary, alt) in enumerate(shortcuts):
+            table.setItem(row, 0, QTableWidgetItem(action))
+            table.setItem(row, 1, QTableWidgetItem(primary))
+            table.setItem(row, 2, QTableWidgetItem(alt))
+
+        layout.addWidget(table)
+        return w
+
+    def _build_ffmpeg_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        # Status
+        available = _is_ffmpeg_available()
+        status_text = tr("settings_ffmpeg_installed") if available else tr("settings_ffmpeg_not_installed")
+        self._lbl_ffmpeg_status = QLabel(status_text)
+        form.addRow(tr("settings_ffmpeg_status"), self._lbl_ffmpeg_status)
+
+        # Version
+        version = get_ffmpeg_version() if available else tr("settings_ffmpeg_unknown_version")
+        self._lbl_ffmpeg_version = QLabel(version or tr("settings_ffmpeg_unknown_version"))
+        form.addRow(tr("settings_ffmpeg_version"), self._lbl_ffmpeg_version)
+
+        # Location
+        try:
+            loc = _ffmpeg_binary()
+        except FFmpegNotFoundError:
+            loc = "—"
+        lbl_loc = QLabel(loc)
+        lbl_loc.setWordWrap(True)
+        lbl_loc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow(tr("settings_ffmpeg_location"), lbl_loc)
+
+        form.addRow(QLabel(""))  # spacer
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        if not available:
+            self._btn_download = QPushButton(tr("settings_ffmpeg_btn_download"))
+            qconnect(self._btn_download.clicked, self._on_download_ffmpeg)
+            btn_row.addWidget(self._btn_download)
+        else:
+            self._btn_check = QPushButton(tr("settings_ffmpeg_btn_check_update"))
+            qconnect(self._btn_check.clicked, self._on_check_update)
+            btn_row.addWidget(self._btn_check)
+
+        self._lbl_update_info = QLabel("")
+        btn_row.addWidget(self._lbl_update_info, 1)
+        form.addRow(btn_row)
+
+        return w
+
+    def _on_download_ffmpeg(self) -> None:
+        import sys as _sys
+        if _sys.platform.startswith("win"):
+            if install_ffmpeg_windows(self):
+                self._lbl_ffmpeg_status.setText(tr("settings_ffmpeg_installed"))
+                ver = get_ffmpeg_version()
+                self._lbl_ffmpeg_version.setText(ver or tr("settings_ffmpeg_unknown_version"))
+
+    def _on_check_update(self) -> None:
+        self._btn_check.setEnabled(False)
+        self._btn_check.setText(tr("settings_ffmpeg_checking"))
+        self._lbl_update_info.setText("")
+
+        import threading
+
+        def _bg():
+            try:
+                latest = check_ffmpeg_latest_version()
+                current = get_ffmpeg_version()
+                mw.taskman.run_on_main(lambda: self._on_check_result(current, latest))
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                mw.taskman.run_on_main(lambda: self._on_check_result("", ""))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_check_result(self, current: str, latest: str) -> None:
+        self._btn_check.setEnabled(True)
+        self._btn_check.setText(tr("settings_ffmpeg_btn_check_update"))
+
+        if not latest:
+            self._lbl_update_info.setText(tr("settings_ffmpeg_check_error"))
+            return
+
+        if current and latest and current.startswith(latest):
+            self._lbl_update_info.setText(
+                tr("settings_ffmpeg_up_to_date", version=current)
+            )
+        else:
+            self._lbl_update_info.setText(
+                tr("settings_ffmpeg_update_available",
+                   current=current or "?", latest=latest)
+            )
+            # Add update button
+            self._btn_update = QPushButton(
+                tr("settings_ffmpeg_btn_update", version=latest)
+            )
+            qconnect(self._btn_update.clicked, self._on_update_ffmpeg)
+            self._btn_check.parent().layout().addWidget(self._btn_update)
+
+    def _on_update_ffmpeg(self) -> None:
+        import sys as _sys
+        if _sys.platform.startswith("win"):
+            if install_ffmpeg_windows(self):
+                ver = get_ffmpeg_version()
+                self._lbl_ffmpeg_version.setText(ver or tr("settings_ffmpeg_unknown_version"))
+                self._lbl_update_info.setText(
+                    tr("settings_ffmpeg_up_to_date", version=ver)
+                )
+                if hasattr(self, "_btn_update"):
+                    self._btn_update.setVisible(False)
+
+    def _on_save(self) -> None:
+        cfg = _config()
+        cfg["output_format"] = self._combo_format.currentText()
+        cfg["output_bitrate"] = self._combo_bitrate.currentText()
+        cfg["audio_field"] = self._input_audio_field.text().strip() or "Audio"
+        _save_config(cfg)
+        self.accept()
 
 
 # =============================================================================
@@ -451,9 +957,13 @@ class AudioCutterDialog(QDialog):
         )
         self.btn_install_ffmpeg = QPushButton(tr("btn_install_ffmpeg"))
         self.btn_install_ffmpeg.setToolTip(tr("tooltip_install_ffmpeg"))
+        self.btn_settings = QPushButton(tr("settings_btn_settings"))
+        self.btn_settings.setToolTip(tr("settings_tooltip"))
+        self.btn_settings.setStyleSheet(STYLING_SETTINGS_BTN)
         file_row.addWidget(self.btn_pick)
         file_row.addWidget(self.lbl_file, 1)
         file_row.addWidget(self.btn_install_ffmpeg)
+        file_row.addWidget(self.btn_settings)
         outer.addLayout(file_row)
 
         # FFmpeg status banner
@@ -601,11 +1111,15 @@ class AudioCutterDialog(QDialog):
         self.queue_list.setStyleSheet(STYLING_QUEUE_LIST)
         queue_layout.addWidget(self.queue_list, 1)
         queue_btns = QVBoxLayout()
+        self.btn_queue_play = QPushButton(tr("btn_queue_play"))
+        self.btn_queue_play.setToolTip(tr("tooltip_queue_play"))
+        self.btn_queue_play.setStyleSheet(STYLING_QUEUE_PLAY_BTN)
         self.btn_queue_remove = QPushButton(tr("btn_queue_remove"))
         self.btn_queue_remove.setToolTip(tr("tooltip_queue_remove"))
         self.btn_queue_clear = QPushButton(tr("btn_queue_clear"))
         self.btn_queue_cut_all = QPushButton(tr("btn_queue_cut_all"))
         self.btn_queue_cut_all.setStyleSheet(STYLING_QUEUE_CUT_ALL)
+        queue_btns.addWidget(self.btn_queue_play)
         queue_btns.addWidget(self.btn_queue_remove)
         queue_btns.addWidget(self.btn_queue_clear)
         queue_btns.addWidget(self.btn_queue_cut_all)
@@ -691,9 +1205,13 @@ class AudioCutterDialog(QDialog):
         qconnect(self.btn_add_note.clicked, self._on_add_note)
         qconnect(self.btn_cut_and_add.clicked, self._on_cut_and_add)
         qconnect(self.btn_add_queue.clicked, self._on_add_to_queue)
+        qconnect(self.btn_queue_play.clicked, self._on_queue_play)
         qconnect(self.btn_queue_remove.clicked, self._on_queue_remove)
         qconnect(self.btn_queue_clear.clicked, self._on_queue_clear)
         qconnect(self.btn_queue_cut_all.clicked, self._on_queue_cut_all)
+        qconnect(self.queue_list.itemDoubleClicked, self._on_queue_item_double_clicked)
+        qconnect(self.queue_list.currentRowChanged, self._on_queue_item_selected)
+        qconnect(self.btn_settings.clicked, self._on_open_settings)
 
         # Wire nudge & preview buttons
         qconnect(self.btn_nudge_s_m500.clicked, lambda: self._nudge_time(True, -NUDGE_STEP_LARGE_SEC))
@@ -909,7 +1427,11 @@ class AudioCutterDialog(QDialog):
         self.btn_notetype.setText(self._selected_notetype)
 
     def _on_pick_deck(self) -> None:
-        result = SearchableSelectDialog.select(
+        # Refresh deck list from Anki
+        col = mw.col
+        if col:
+            self._deck_names = [d.name for d in col.decks.all_names_and_ids()]
+        result = DeckSelectDialog.select(
             tr("search_deck_title"),
             self._deck_names,
             self._selected_deck,
@@ -918,9 +1440,16 @@ class AudioCutterDialog(QDialog):
         if result:
             self._selected_deck = result
             self.btn_deck.setText(result)
+            # Refresh deck list in case CRUD operations changed it
+            if col:
+                self._deck_names = [d.name for d in col.decks.all_names_and_ids()]
 
     def _on_pick_notetype(self) -> None:
-        result = SearchableSelectDialog.select(
+        # Refresh notetype list from Anki
+        col = mw.col
+        if col:
+            self._notetype_names = [n.name for n in col.models.all_names_and_ids()]
+        result = NoteTypeSelectDialog.select(
             tr("search_notetype_title"),
             self._notetype_names,
             self._selected_notetype,
@@ -930,6 +1459,9 @@ class AudioCutterDialog(QDialog):
             self._selected_notetype = result
             self.btn_notetype.setText(result)
             self._render_fields_for_current_notetype()
+            # Refresh notetype list in case CRUD operations changed it
+            if col:
+                self._notetype_names = [n.name for n in col.models.all_names_and_ids()]
 
     def _render_fields_for_current_notetype(self) -> None:
         col = mw.col
@@ -1916,3 +2448,67 @@ class AudioCutterDialog(QDialog):
                     target_editor.setPlainText(sound_tag)
                 target_editor.setFocus()
                 tooltip(tr("queue_insert_success"), parent=self, period=1200)
+
+    # ------------------------- Settings -------------------
+
+    def _on_open_settings(self) -> None:
+        dlg = SettingsDialog(self)
+        if dlg.exec():
+            # Refresh audio field combo if the config changed
+            self._render_fields_for_current_notetype()
+            self._refresh_ffmpeg_status()
+
+    # ------------------------- Queue selection & play ------
+
+    def _on_queue_item_selected(self, row: int) -> None:
+        """Single-click on queue item: highlight its region on the waveform."""
+        if row < 0 or row >= len(self._batch_queue):
+            return
+        s, e, _filename = self._batch_queue[row]
+        # Update region on waveform
+        self.slider_pos.set_region(int(s * 1000), int(e * 1000))
+        # Update start/end input fields
+        self.input_start.blockSignals(True)
+        self.input_end.blockSignals(True)
+        self.input_start.setText(fmt_time(s))
+        self.input_end.setText(fmt_time(e))
+        self.input_start.blockSignals(False)
+        self.input_end.blockSignals(False)
+
+    def _on_queue_play(self) -> None:
+        """Play the currently selected queue item (cut audio or region preview)."""
+        row = self.queue_list.currentRow()
+        if row < 0 or row >= len(self._batch_queue):
+            tooltip(tr("queue_no_selection"), parent=self)
+            return
+        s, e, filename = self._batch_queue[row]
+
+        if not HAS_MEDIA:
+            return
+
+        if filename:
+            # Play the already-cut audio file
+            cut_path = os.path.join(mw.col.media.dir(), filename)
+            if os.path.exists(cut_path):
+                self._stop_at_ms = -1
+                url = QUrl.fromLocalFile(cut_path)
+                if QT_MAJOR == 6:
+                    self._player.setSource(url)
+                else:
+                    self._player.setMedia(QMediaContent(url))
+                self._player.play()
+                self._tick.start()
+                tooltip(tr("queue_preview_cut"), parent=self, period=1000)
+        elif self._src_path:
+            # Preview region from source audio
+            # Reload source audio if needed
+            url = QUrl.fromLocalFile(self._src_path)
+            if QT_MAJOR == 6:
+                current_src = self._player.source()
+                if current_src != url:
+                    self._player.setSource(url)
+            self._stop_at_ms = int(round(e * 1000))
+            self._player.setPosition(int(round(s * 1000)))
+            self._player.play()
+            self._tick.start()
+            tooltip(tr("queue_preview_uncut"), parent=self, period=1000)
