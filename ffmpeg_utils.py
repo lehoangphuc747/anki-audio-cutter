@@ -343,17 +343,35 @@ def get_ffmpeg_version() -> str:
 def check_ffmpeg_latest_version() -> str:
     """Fetch the latest FFmpeg release version from gyan.dev. Returns '' on failure."""
     try:
+        # Fetch the direct version text file first (preferred)
+        req = urllib.request.Request(
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.ver",
+            headers={"User-Agent": "anki-audio-cutter/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            ver = resp.read().decode("utf-8", errors="ignore").strip()
+            if ver and re.match(r'^[0-9.]+$', ver):
+                return ver
+    except Exception:
+        traceback.print_exc()
+
+    # Fallback to scraping HTML if the direct file fails
+    try:
         req = urllib.request.Request(
             "https://www.gyan.dev/ffmpeg/builds/",
             headers={"User-Agent": "anki-audio-cutter/1.0"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             page = resp.read().decode("utf-8", errors="ignore")
+        m = re.search(r'id="release-version"\s*>\s*([\d.]+)', page)
+        if m:
+            return m.group(1)
         m = re.search(r'release:\s*([\d.]+)', page)
-        return m.group(1) if m else ""
+        if m:
+            return m.group(1)
     except Exception:
         traceback.print_exc()
-        return ""
+    return ""
 
 
 def update_ffmpeg_windows(parent: QWidget) -> bool:
