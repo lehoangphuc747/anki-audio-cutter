@@ -1,0 +1,11 @@
+{
+    "audio_field": "Audio",
+    "default_deck": "",
+    "default_notetype": "",
+    "output_format": "mp3",
+    "output_bitrate": "128k",
+    "ffmpeg_path": "",
+    "language": "",
+    "last_audio_dir": "",
+    "last_tags": ""
+}
