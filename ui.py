@@ -192,11 +192,23 @@ class AudioCutterDialog(QDialog):
         self.lbl_time = QLabel("0:00.00 / 0:00.00")
         self.lbl_time.setStyleSheet(STYLING_LBL_TIME)
         self.lbl_time.setMinimumWidth(150)
+        
         self.slider_pos = AudioWaveformWidget(self)
         self.slider_pos.setRange(0, 0)
         self.slider_pos.setSingleStep(100)
         self.slider_pos.setPageStep(2000)
         self.slider_pos.set_region_callback(self._on_waveform_region_changed)
+
+        # QScrollArea to support horizontal scrollbar on zoom
+        self.waveform_scroll = QScrollArea()
+        self.waveform_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        always_off = Qt.ScrollBarPolicy.ScrollBarAlwaysOff if QT_MAJOR == 6 else Qt.ScrollBarAlwaysOff
+        as_needed = Qt.ScrollBarPolicy.ScrollBarAsNeeded if QT_MAJOR == 6 else Qt.ScrollBarAsNeeded
+        self.waveform_scroll.setVerticalScrollBarPolicy(always_off)
+        self.waveform_scroll.setHorizontalScrollBarPolicy(as_needed)
+        self.waveform_scroll.setWidgetResizable(True)
+        self.waveform_scroll.setWidget(self.slider_pos)
+        self.waveform_scroll.setMinimumHeight(64)
 
         self.combo_speed = QComboBox()
         self.combo_speed.addItems(["0.7x", "0.8x", "0.9x", "1.0x", "1.1x", "1.2x", "1.5x"])
@@ -204,10 +216,21 @@ class AudioCutterDialog(QDialog):
         self.combo_speed.setFixedWidth(55)
         self.combo_speed.setStyleSheet(STYLING_COMBO_SPEED_STYLING)
 
+        # Zoom layout
+        self.lbl_zoom = QLabel("🔍")
+        self.lbl_zoom.setStyleSheet(STYLING_LBL_FILE_UNLOADED + " font-size: 11px;")
+        self.slider_zoom = QSlider(Qt.Orientation.Horizontal)
+        self.slider_zoom.setRange(100, 1000)  # 1.0x to 10.0x zoom
+        self.slider_zoom.setValue(100)
+        self.slider_zoom.setFixedWidth(80)
+        self.slider_zoom.setToolTip("Zoom waveform (Ctrl + Mouse Wheel)")
+
         play_row.addWidget(self.btn_play)
-        play_row.addWidget(self.slider_pos, 1)
+        play_row.addWidget(self.waveform_scroll, 1)
         play_row.addWidget(self.lbl_time)
         play_row.addWidget(self.combo_speed)
+        play_row.addWidget(self.lbl_zoom)
+        play_row.addWidget(self.slider_zoom)
         outer.addLayout(play_row)
 
         # 3. Region selectors -------------------------------
@@ -451,6 +474,7 @@ class AudioCutterDialog(QDialog):
         qconnect(self.queue_list.itemDoubleClicked, self._on_queue_item_double_clicked)
         qconnect(self.queue_list.currentRowChanged, self._on_queue_item_selected)
         qconnect(self.btn_settings.clicked, self._on_open_settings)
+        qconnect(self.slider_zoom.valueChanged, self._on_zoom_changed)
 
         # Wire nudge & preview buttons
         qconnect(self.btn_nudge_s_m500.clicked, lambda: self._nudge_time(True, -NUDGE_STEP_LARGE_SEC))
@@ -1217,6 +1241,40 @@ class AudioCutterDialog(QDialog):
             self._player.setPlaybackRate(rate)
         except Exception:
             traceback.print_exc()
+
+    def _on_zoom_changed(self, val: int) -> None:
+        if not hasattr(self, "waveform_scroll") or not hasattr(self, "slider_pos"):
+            return
+        zoom_factor = val / 100.0
+        viewport_width = max(100, self.waveform_scroll.viewport().width())
+        
+        # Save current playhead position ratio to keep it centered
+        val_range = self.slider_pos.maximum() - self.slider_pos.minimum()
+        playhead_ratio = 0.0
+        if val_range > 0:
+            playhead_ratio = (self.slider_pos.value() - self.slider_pos.minimum()) / val_range
+            
+        new_width = int(viewport_width * zoom_factor)
+        self.slider_pos.setFixedWidth(new_width)
+        
+        # Center horizontal scrollbar on the playhead
+        hbar = self.waveform_scroll.horizontalScrollBar()
+        new_center_x = playhead_ratio * new_width
+        new_scroll_val = int(new_center_x - viewport_width / 2)
+        hbar.setValue(max(0, min(new_scroll_val, hbar.maximum())))
+
+    def change_zoom(self, zoom_in: bool) -> None:
+        if not hasattr(self, "slider_zoom"):
+            return
+        curr = self.slider_zoom.value()
+        step = 50  # 0.5x steps
+        new_val = curr + step if zoom_in else curr - step
+        self.slider_zoom.setValue(max(100, min(new_val, 1000)))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "slider_zoom") and hasattr(self, "waveform_scroll"):
+            self._on_zoom_changed(self.slider_zoom.value())
 
     # ------------------------- Cut (only cut, no note) ----
 

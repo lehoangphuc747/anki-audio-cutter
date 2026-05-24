@@ -222,3 +222,22 @@ class AudioWaveformWidget(QAbstractSlider):
             else:
                 bins.append(0.0)
         return bins
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            angle = event.angleDelta().y()
+            # The parent of self inside QScrollArea is the viewport, and its parent is the QScrollArea, and its parent is the dialog.
+            # But in ui.py we set parent of AudioWaveformWidget to self (the dialog).
+            # Let's check both self.parent() and self.window() or parent of scroll area to be safe.
+            # We can find the dialog by traversing parent() or checking hasattr.
+            target = self.parent()
+            for _ in range(5):
+                if target and hasattr(target, "change_zoom"):
+                    break
+                if target:
+                    target = target.parent()
+            if target and hasattr(target, "change_zoom"):
+                target.change_zoom(angle > 0)
+            event.accept()
+        else:
+            event.ignore()
