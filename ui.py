@@ -99,6 +99,7 @@ class AudioWaveformWidget(QAbstractSlider):
         self._is_selecting: bool = False
         self._drag_start_val: int = 0
         self._region_callback = None
+        self._queued_regions: list[tuple[int, int]] = []
 
         self.setMinimumHeight(64)
         self.setSizePolicy(
@@ -112,6 +113,10 @@ class AudioWaveformWidget(QAbstractSlider):
         self._waveform_data = data
         self._binned_data.clear()
         self._binned_width = -1
+        self.update()
+
+    def set_queued_regions(self, regions: list[tuple[int, int]]) -> None:
+        self._queued_regions = regions
         self.update()
 
     def set_region(self, start_ms: int, end_ms: int) -> None:
@@ -194,6 +199,32 @@ class AudioWaveformWidget(QAbstractSlider):
 
         painter.setPen(QColor(180, 180, 180, 80))
         painter.drawRect(0, 0, w - 1, h - 1)
+
+        # 1.5. Draw Queued Regions (Background translucent green highlights + dashed borders)
+        val_range = self.maximum() - self.minimum()
+        if val_range > 0 and self._queued_regions:
+            from aqt.qt import QPen
+            queued_overlay_color = QColor(76, 175, 80, 30)  # Translucent green/teal
+            dashed_pen = QPen(QColor(76, 175, 80, 180))
+            dashed_pen.setStyle(Qt.PenStyle.DashLine)
+            dashed_pen.setWidth(1)
+
+            for s_ms, e_ms in self._queued_regions:
+                if s_ms >= 0 and e_ms >= 0 and e_ms > s_ms:
+                    s_ratio = (s_ms - self.minimum()) / val_range
+                    e_ratio = (e_ms - self.minimum()) / val_range
+                    qx_start = int(s_ratio * w)
+                    qx_end = int(e_ratio * w)
+                    
+                    # Fill background of queued region
+                    painter.fillRect(qx_start, 0, qx_end - qx_start, h, queued_overlay_color)
+                    
+                    # Draw vertical boundary lines
+                    painter.save()
+                    painter.setPen(dashed_pen)
+                    painter.drawLine(qx_start, 0, qx_start, h)
+                    painter.drawLine(qx_end, 0, qx_end, h)
+                    painter.restore()
 
         # 2. Draw Waveform
         if self._waveform_data:
@@ -372,8 +403,9 @@ class AudioCutterDialog(QDialog):
         # Duplicate detection: list of (start, end) cut in this session per file
         self._cut_history: list[tuple[float, float]] = []
         self._cut_history_file: str = ""
-        # Batch queue: list of (start, end, fields_dict, tags)
-        self._batch_queue: list[tuple[float, float, dict, str]] = []
+        # Batch queue: list of [start, end, filename]
+        self._batch_queue: list[list] = []
+        self._last_batch_files: list[str] = []
         # Deck/notetype selection
         self._deck_names: list[str] = []
         self._notetype_names: list[str] = []
@@ -1636,13 +1668,12 @@ class AudioCutterDialog(QDialog):
     # ------------------------- Undo ----------------------
 
     def _on_undo(self) -> None:
-        if self._last_note_id is None and not self._last_audio_file:
+        if self._last_note_id is None and not self._last_audio_file and not self._last_batch_files:
             tooltip(tr("undo_nothing"), parent=self)
             return
 
-        audio_file = self._last_audio_file
-
         if self._last_note_id is not None:
+            audio_file = self._last_audio_file
             nid = self._last_note_id
             ans = QMessageBox.question(
                 self,
@@ -1662,8 +1693,43 @@ class AudioCutterDialog(QDialog):
                 showWarning(tr("undo_error", error=exc), parent=self)
                 return
             self._last_note_id = None
+            self._last_audio_file = ""
             tooltip(tr("undo_success"), parent=self, period=1800)
+        elif self._last_batch_files:
+            count = len(self._last_batch_files)
+            ans = QMessageBox.question(
+                self,
+                tr("undo_confirm_title"),
+                tr("undo_confirm_batch_files", count=count),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+            media_dir = mw.col.media.dir() if (mw and mw.col) else None
+            if media_dir:
+                for audio_file in self._last_batch_files:
+                    if audio_file:
+                        audio_path = os.path.join(media_dir, audio_file)
+                        if os.path.exists(audio_path):
+                            try:
+                                os.remove(audio_path)
+                            except OSError:
+                                pass
+
+            # Restore queue items back to uncut state
+            for item in self._batch_queue:
+                if item[2] in self._last_batch_files:
+                    item[2] = None
+            self._refresh_queue_ui()
+
+            for _ in range(count):
+                if self._cut_history:
+                    self._cut_history.pop()
+            self._last_batch_files = []
+            tooltip(tr("undo_success_batch_files"), parent=self, period=1800)
         else:
+            audio_file = self._last_audio_file
             ans = QMessageBox.question(
                 self,
                 tr("undo_confirm_title"),
@@ -1683,9 +1749,9 @@ class AudioCutterDialog(QDialog):
                         pass
             if self._cut_history:
                 self._cut_history.pop()
+            self._last_audio_file = ""
             tooltip(tr("undo_success_file_only"), parent=self, period=1800)
 
-        self._last_audio_file = ""
         self.btn_undo.setEnabled(False)
         try:
             mw.reset()
@@ -1699,14 +1765,8 @@ class AudioCutterDialog(QDialog):
         if region is None:
             return
         start, end = region
-        fields = {
-            name: ed.toPlainText() for name, ed in self._field_editors.items()
-        }
-        tags = self.input_tags.text().strip()
-        self._batch_queue.append((start, end, fields, tags))
+        self._batch_queue.append([start, end, None])
         self._refresh_queue_ui()
-        for editor in self._field_editors.values():
-            editor.clear()
         tooltip(
             tr("queue_added", start=fmt_time(start), end=fmt_time(end)),
             parent=self, period=1200,
@@ -1726,21 +1786,22 @@ class AudioCutterDialog(QDialog):
 
     def _refresh_queue_ui(self) -> None:
         self.queue_list.clear()
-        for i, (s, e, fields, tags) in enumerate(self._batch_queue):
-            preview = ""
-            for v in fields.values():
-                if v.strip():
-                    preview = v.strip()[:40]
-                    break
-            text = f"{i + 1}. [{fmt_time(s)} \u2013 {fmt_time(e)}]"
-            if preview:
-                text += f"  {preview}"
-            if tags:
-                text += f"  #{tags.split()[0]}"
+        for i, item in enumerate(self._batch_queue):
+            s, e, filename = item
+            text = f"{i + 1}. "
+            if filename is None:
+                text += tr("queue_uncut", start=fmt_time(s), end=fmt_time(e))
+            else:
+                text += tr("queue_cut", start=fmt_time(s), end=fmt_time(e)) + f" -> [sound:{filename}]"
             self.queue_list.addItem(text)
         count = len(self._batch_queue)
         self.queue_box.setTitle(tr("queue_title", count=count))
         self.queue_box.setVisible(count > 0)
+        self._update_waveform_queued_regions()
+
+    def _update_waveform_queued_regions(self) -> None:
+        regions_ms = [(int(s * 1000), int(e * 1000)) for s, e, _ in self._batch_queue]
+        self.slider_pos.set_queued_regions(regions_ms)
 
     def _on_queue_cut_all(self) -> None:
         if not self._batch_queue or not self._src_path:
@@ -1753,9 +1814,6 @@ class AudioCutterDialog(QDialog):
             showWarning(str(exc), parent=self)
             return
 
-        deck_name = self._selected_deck or None
-        notetype_name = self._selected_notetype or None
-        audio_field_name = self.combo_audio_field.currentText()
         queue = list(self._batch_queue)
         media_dir = mw.col.media.dir()
         src = self._src_path
@@ -1768,82 +1826,93 @@ class AudioCutterDialog(QDialog):
 
         def _bg_batch():
             results = []
-            for i, (start, end, fields, tags) in enumerate(queue):
-                try:
-                    filename = _cut_audio_to_media(
-                        src_path=src, start=start, end=end,
-                        media_dir=media_dir,
-                    )
-                    results.append((filename, fields, tags, start, end, None))
-                except Exception:
-                    results.append((None, fields, tags, start, end,
-                                    traceback.format_exc()))
+            for i, item in enumerate(queue):
+                start, end, filename = item
+                if filename is not None:
+                    results.append((filename, start, end, None))
+                else:
+                    try:
+                        filename = _cut_audio_to_media(
+                            src_path=src, start=start, end=end,
+                            media_dir=media_dir,
+                        )
+                        results.append((filename, start, end, None))
+                    except Exception:
+                        results.append((None, start, end, traceback.format_exc()))
                 mw.taskman.run_on_main(
                     lambda n=i + 1: self.btn_queue_cut_all.setText(
                         tr("batch_progress", done=n, total=len(queue))
                     )
                 )
-            mw.taskman.run_on_main(lambda: self._finish_batch(
-                results, deck_name, notetype_name, audio_field_name,
-            ))
+            mw.taskman.run_on_main(lambda: self._finish_batch(results))
 
         threading.Thread(target=_bg_batch, daemon=True).start()
 
-    def _finish_batch(
-        self,
-        results: list,
-        deck_name: Optional[str],
-        notetype_name: Optional[str],
-        audio_field_name: str,
-    ) -> None:
+    def _finish_batch(self, results: list) -> None:
         self.btn_queue_cut_all.setEnabled(True)
         self.btn_queue_cut_all.setText(tr("btn_queue_cut_all"))
         self.btn_cut.setEnabled(True)
 
         ok_count = 0
         err_count = 0
-        mw.checkpoint("Add Audio Notes (Batch)")
-        for filename, fields, tags, start, end, err in results:
+
+        for i, (filename, start, end, err) in enumerate(results):
             if err or not filename:
                 err_count += 1
-                continue
-            try:
-                nid = _add_note(
-                    deck_name=deck_name,
-                    notetype_name=notetype_name,
-                    fields=fields,
-                    audio_filename=filename,
-                    audio_field_name=audio_field_name,
-                    tags=tags,
-                )
-                if nid:
-                    ok_count += 1
-                    if self._cut_history_file != self._src_path:
-                        self._cut_history.clear()
-                        self._cut_history_file = self._src_path
-                    self._cut_history.append((start, end))
-                else:
-                    err_count += 1
-            except Exception:
-                traceback.print_exc()
-                err_count += 1
+                if i < len(self._batch_queue):
+                    self._batch_queue[i][2] = None
+            else:
+                ok_count += 1
+                if i < len(self._batch_queue):
+                    self._batch_queue[i][2] = filename
+                if self._cut_history_file != self._src_path:
+                    self._cut_history.clear()
+                    self._cut_history_file = self._src_path
+                self._cut_history.append((start, end))
 
-        self._batch_queue.clear()
         self._refresh_queue_ui()
 
-        if ok_count > 0:
-            cfg = _config()
-            cfg["default_deck"] = deck_name or ""
-            cfg["default_notetype"] = notetype_name or ""
-            cfg["audio_field"] = audio_field_name
-            _save_config(cfg)
-            try:
-                mw.reset()
-            except Exception:
-                pass
+        # Track batch files for undo
+        self._last_batch_files = [filename for filename, start, end, err in results if filename and not err]
+        self._last_note_id = None
+        if self._last_batch_files:
+            self._last_audio_file = ""
+            self.btn_undo.setEnabled(True)
 
         if err_count:
-            msg = tr("batch_done_errors", ok=ok_count, errors=err_count)
+            msg = tr("batch_cut_done_errors", ok=ok_count, errors=err_count)
         else:
-            msg = tr("batch_done", ok=ok_count)
+            msg = tr("batch_cut_done", ok=ok_count)
         tooltip(msg, parent=self, period=2500)
+
+    def _on_queue_item_double_clicked(self, item) -> None:
+        row = self.queue_list.row(item)
+        if 0 <= row < len(self._batch_queue):
+            s, e, filename = self._batch_queue[row]
+            if filename is None:
+                tooltip(tr("queue_warn_cut_first"), parent=self)
+                return
+
+            target_editor = None
+            focused = self.focusWidget()
+            for fname, ed in self._field_editors.items():
+                if ed == focused:
+                    target_editor = ed
+                    break
+
+            if target_editor is None:
+                audio_field = self.combo_audio_field.currentText()
+                if audio_field in self._field_editors:
+                    target_editor = self._field_editors[audio_field]
+
+            if target_editor:
+                sound_tag = f"[sound:{filename}]"
+                cursor = target_editor.textCursor()
+                if target_editor.toPlainText().strip():
+                    if cursor.position() > 0 and not cursor.atBlockStart():
+                        cursor.insertText(" ")
+                    cursor.insertText(sound_tag)
+                else:
+                    target_editor.setPlainText(sound_tag)
+                target_editor.setFocus()
+                tooltip(tr("queue_insert_success"), parent=self, period=1200)
