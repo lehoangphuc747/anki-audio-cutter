@@ -67,4 +67,5 @@ def _setup() -> None:
     get_or_create_ankivn_menu().addAction(action)
 
 
-_setup()
+if mw is not None:
+    _setup()
