@@ -373,10 +373,7 @@ class AudioCutterDialog(QDialog):
 
         # 5. Action row ------------------------------------
         action_row = QHBoxLayout()
-        hint = QLabel(tr("shortcut_hint"))
-        hint.setStyleSheet(STYLING_LBL_FILE_UNLOADED + " font-size: 11px;")
-        hint.setWordWrap(True)
-        action_row.addWidget(hint, 1)
+        action_row.addStretch(1)
 
         self.btn_undo = QPushButton(tr("btn_undo"))
         self.btn_undo.setToolTip(tr("tooltip_undo"))
@@ -419,6 +416,16 @@ class AudioCutterDialog(QDialog):
         columns_layout.addWidget(right_col, 3)
 
         outer.addLayout(columns_layout)
+
+        # Centered, full-width shortcut hint at the very bottom
+        hint_layout = QHBoxLayout()
+        hint_layout.setContentsMargins(0, 4, 0, 0)
+        hint = QLabel(tr("shortcut_hint"))
+        hint.setStyleSheet(STYLING_LBL_FILE_UNLOADED + " font-size: 11px;")
+        align_center = Qt.AlignmentFlag.AlignCenter if QT_MAJOR == 6 else Qt.AlignCenter
+        hint.setAlignment(align_center)
+        hint_layout.addWidget(hint)
+        outer.addLayout(hint_layout)
 
         # Wire ---------------------------------------------
         qconnect(self.btn_pick.clicked, self._on_pick_file)
