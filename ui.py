@@ -944,6 +944,7 @@ class AudioCutterDialog(QDialog):
         self.btn_set_end.setEnabled(loaded)
         self.btn_preview.setEnabled(loaded and HAS_MEDIA)
         self.btn_cut.setEnabled(loaded)
+        self.btn_add_note.setEnabled(loaded)
         self.btn_cut_and_add.setEnabled(loaded)
 
         # Toggle nudge buttons and hear start/end buttons
@@ -1363,7 +1364,8 @@ class AudioCutterDialog(QDialog):
     # ------------------------- Add Note -------------------
 
     def _on_add_note(self) -> None:
-        if not self._pending_cut_file:
+        has_content = any(ed.toPlainText().strip() for ed in self._field_editors.values())
+        if not self._pending_cut_file and not has_content:
             tooltip(tr("cut_first"), parent=self)
             return
 
@@ -1407,7 +1409,7 @@ class AudioCutterDialog(QDialog):
             # Reset pending cut
             self._pending_cut_file = ""
             self.btn_play_cut.setEnabled(False)
-            self.btn_add_note.setEnabled(False)
+            self.btn_add_note.setEnabled(bool(self._src_path))
 
             # Reload original audio into player
             if HAS_MEDIA and self._src_path:

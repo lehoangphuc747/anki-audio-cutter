@@ -40,7 +40,6 @@ def _add_note(
     did = col.decks.id(deck_name) if deck_name else col.decks.get_current_id()
 
     note = col.new_note(model)
-    sound_tag = f"[sound:{audio_filename}]"
     field_names = [f["name"] for f in model["flds"]]
 
     for fname, value in (fields or {}).items():
@@ -48,10 +47,12 @@ def _add_note(
             note[fname] = value or ""
 
     # Place audio in the user-selected field if not already present
-    target = audio_field_name if audio_field_name in field_names else field_names[-1]
-    existing = note[target]
-    if sound_tag not in existing:
-        note[target] = (existing + " " + sound_tag).strip() if existing else sound_tag
+    if audio_filename:
+        sound_tag = f"[sound:{audio_filename}]"
+        target = audio_field_name if audio_field_name in field_names else field_names[-1]
+        existing = note[target]
+        if sound_tag not in existing:
+            note[target] = (existing + " " + sound_tag).strip() if existing else sound_tag
 
     if tags:
         note.tags = col.tags.split(tags)
